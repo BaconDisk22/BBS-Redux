@@ -1,2 +1,4 @@
 meshtastic
 pypubsub
+paho-mqtt
+requests

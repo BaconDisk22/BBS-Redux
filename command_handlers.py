@@ -1,6 +1,9 @@
 import configparser
 import logging
+import os
 import random
+import requests
+import sqlite3
 import time
 
 from meshtastic import BROADCAST_NUM
@@ -9,12 +12,15 @@ from db_operations import (
     add_bulletin, add_mail, delete_mail,
     get_bulletin_content, get_bulletins,
     get_mail, get_mail_content,
-    add_channel, get_channels, get_sender_id_by_mail_id
+    add_channel, get_channels, get_sender_id_by_mail_id,
+    get_node_from_db, get_node_by_shortname_from_db
 )
 from utils import (
     get_node_id_from_num, get_node_info,
     get_node_short_name, send_message,
-    update_user_state
+    update_user_state, get_user_state,
+    normalize_message, get_sender_short_name,
+    validate_item_selection, send_announcement
 )
 
 # Read the configuration for menu options
@@ -52,6 +58,14 @@ def build_menu(items, menu_name):
             menu_str += "[F]ortune\n"
         elif item.strip() == 'W':
             menu_str += "[W]all of Shame\n"
+        elif item.strip() == 'T':
+            menu_str += "[T]op MQTT Topics\n"
+        elif item.strip() == 'R':
+            menu_str += "Weathe[R]\n"
+        elif item.strip() == 'A':
+            menu_str += "[A]nnouncement\n"
+        elif item.strip() == 'N':
+            menu_str += "[N]ode Info\n"
     return menu_str
 
 def handle_help_command(sender_id, interface, menu_name=None):
@@ -112,10 +126,96 @@ def handle_fortune_command(sender_id, interface):
         send_message(f"Error generating fortune: {e}", sender_id, interface)
 
 
+def handle_weather_command(sender_id, interface, location=None):
+    """
+    Fetch and display weather information for a given location.
+    Location can be a zip code, or city,state format.
+    If no location provided, uses default from config.
+    """
+    try:
+        # Get API key and default location from config
+        api_key = config.get('weather', 'api_key', fallback=None)
+        
+        if not api_key or api_key == 'YOUR_API_KEY_HERE':
+            send_message("⚠️ Weather service not configured. Please set API key in config.ini", sender_id, interface)
+            return
+        
+        # Use provided location or default from config
+        if not location:
+            location = config.get('weather', 'default_location', fallback='48336')
+        
+        units = config.get('weather', 'units', fallback='imperial')
+        
+        # Build API URL - OpenWeatherMap API
+        base_url = "http://api.openweathermap.org/data/2.5/weather"
+        
+        # Determine if location is a zip code or city name
+        if location.isdigit():
+            # Assume US zip code
+            params = {
+                'zip': f"{location},US",
+                'appid': api_key,
+                'units': units
+            }
+        else:
+            # Assume city,state or city,country format
+            params = {
+                'q': location,
+                'appid': api_key,
+                'units': units
+            }
+        
+        # Make API request
+        response = requests.get(base_url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Extract weather data
+            location_name = data.get('name', 'Unknown')
+            temp = data['main']['temp']
+            feels_like = data['main']['feels_like']
+            temp_min = data['main']['temp_min']
+            temp_max = data['main']['temp_max']
+            humidity = data['main']['humidity']
+            description = data['weather'][0]['description'].title()
+            wind_speed = data['wind']['speed']
+            
+            # Determine temperature unit
+            temp_unit = '°F' if units == 'imperial' else '°C'
+            wind_unit = 'mph' if units == 'imperial' else 'm/s'
+            
+            # Format weather report
+            weather_report = (
+                f"🌤️ Weather for {location_name} 🌤️\n"
+                f"Condition: {description}\n"
+                f"Temp: {temp:.1f}{temp_unit}\n"
+                f"Feels Like: {feels_like:.1f}{temp_unit}\n"
+                f"High/Low: {temp_max:.1f}/{temp_min:.1f}{temp_unit}\n"
+                f"Humidity: {humidity}%\n"
+                f"Wind: {wind_speed:.1f} {wind_unit}"
+            )
+            
+            send_message(weather_report, sender_id, interface)
+        elif response.status_code == 404:
+            send_message(f"❌ Location '{location}' not found. Try zip code or city,state format.", sender_id, interface)
+        elif response.status_code == 401:
+            send_message("⚠️ Invalid API key. Please check config.ini", sender_id, interface)
+        else:
+            send_message(f"❌ Weather service error: {response.status_code}", sender_id, interface)
+            
+    except requests.exceptions.Timeout:
+        send_message("❌ Weather service timeout. Please try again.", sender_id, interface)
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Weather API request error: {e}")
+        send_message("❌ Unable to fetch weather data.", sender_id, interface)
+    except Exception as e:
+        logging.error(f"Error in weather command: {e}")
+        send_message("❌ Error retrieving weather.", sender_id, interface)
+
+
 def handle_stats_steps(sender_id, message, step, interface):
-    message = message.lower().strip()
-    if len(message) == 2 and message[1] == 'x':
-        message = message[0]
+    message = normalize_message(message)
 
     if step == 1:
         choice = message
@@ -220,7 +320,7 @@ def handle_bb_steps(sender_id, message, step, state, interface, bbs_nodes):
                 send_message("Error: Unable to retrieve your node information.", sender_id, interface)
                 update_user_state(sender_id, None)
                 return
-            sender_short_name = node_info['user'].get('shortName', f"Node {sender_id}")
+            sender_short_name = get_sender_short_name(sender_id, interface)
             unique_id = add_bulletin(board, sender_short_name, subject, content, bbs_nodes, interface)
             send_message(f"Your bulletin '{subject}' has been posted to {board}.\n(╯°□°)╯📄📌[{board}]", sender_id, interface)
             handle_bb_steps(sender_id, 'e', 1, state, interface, bbs_nodes)
@@ -232,8 +332,7 @@ def handle_bb_steps(sender_id, message, step, state, interface, bbs_nodes):
 
 def handle_mail_steps(sender_id, message, step, state, interface, bbs_nodes):
     message = message.strip()
-    if len(message) == 2 and message[1] == 'x':
-        message = message[0]
+    message = normalize_message(message)
 
     if step == 1:
         choice = message.lower()
@@ -322,7 +421,7 @@ def handle_mail_steps(sender_id, message, step, state, interface, bbs_nodes):
             content = state['content']
             recipient_name = get_node_name(recipient_id, interface)
 
-            sender_short_name = get_node_short_name(get_node_id_from_num(sender_id, interface), interface)
+            sender_short_name = get_sender_short_name(sender_id, interface)
             unique_id = add_mail(get_node_id_from_num(sender_id, interface), sender_short_name, recipient_id, subject, content, bbs_nodes, interface)
             send_message(f"Mail has been posted to the mailbox of {recipient_name}.\n(╯°□°)╯📨📬", sender_id, interface)
 
@@ -356,6 +455,63 @@ def handle_wall_of_shame_command(sender_id, interface):
     send_message(response, sender_id, interface)
 
 
+def handle_mqtt_topics_command(sender_id, interface):
+    db_path = 'mqtt_counts.db'
+    if not os.path.exists(db_path):
+        send_message("MQTT topic statistics are unavailable.", sender_id, interface)
+        return
+
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cursor = conn.execute(
+                """
+                SELECT base_topic, subtopic, message_count
+                FROM topic_counts
+                ORDER BY message_count DESC
+                LIMIT 15
+                """
+            )
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logging.error(f"Error reading MQTT topic stats: {exc}")
+        send_message("Unable to read MQTT topic statistics.", sender_id, interface)
+        return
+
+    if not rows:
+        send_message("MQTT topic statistics are unavailable.", sender_id, interface)
+        return
+
+    # Send header first
+    send_message("🏆 Top 15 Topics 🏆", sender_id, interface)
+    
+    # Build all topic lines
+    topic_lines = []
+    for idx, (base_topic, subtopic, message_count) in enumerate(rows, start=1):
+        topic = base_topic if not subtopic else f"{base_topic}/{subtopic}"
+        # Remove msh/US/MI prefix to save space
+        if topic.startswith("msh/US/MI/"):
+            topic = topic[10:]  # Remove "msh/US/MI/"
+        elif topic == "msh/US/MI":
+            topic = "(base)"
+        topic_lines.append(f"{idx:02d}. {topic} — {message_count:,}")
+    
+    # Send in chunks of 3 lines per message
+    chunk_size = 3
+    for i in range(0, len(topic_lines), chunk_size):
+        chunk = topic_lines[i:i + chunk_size]
+        send_message("\n".join(chunk), sender_id, interface)
+        # Add delay between chunks to prevent message loss on mesh network
+        if i + chunk_size < len(topic_lines):
+            time.sleep(3)
+    
+    # Send end message
+    time.sleep(3)
+    send_message("🏁 End of Topics 🏁", sender_id, interface)
+
+
 def handle_channel_directory_command(sender_id, interface):
     response = "📚CHANNEL DIRECTORY📚\nWhat would you like to do?\n[V]iew  [P]ost  E[X]IT"
     send_message(response, sender_id, interface)
@@ -364,8 +520,7 @@ def handle_channel_directory_command(sender_id, interface):
 
 def handle_channel_directory_steps(sender_id, message, step, state, interface):
     message = message.strip()
-    if len(message) == 2 and message[1] == 'x':
-        message = message[0]
+    message = normalize_message(message)
 
     if step == 1:
         choice = message
@@ -426,7 +581,7 @@ def handle_send_mail_command(sender_id, message, interface, bbs_nodes):
 
         recipient_id = nodes[0]['num']
         recipient_name = get_node_name(recipient_id, interface)
-        sender_short_name = get_node_short_name(get_node_id_from_num(sender_id, interface), interface)
+        sender_short_name = get_sender_short_name(sender_id, interface)
 
         unique_id = add_mail(get_node_id_from_num(sender_id, interface), sender_short_name, recipient_id, subject,
                              content, bbs_nodes, interface)
@@ -464,17 +619,18 @@ def handle_check_mail_command(sender_id, interface):
 def handle_read_mail_command(sender_id, message, state, interface):
     try:
         mail = state.get('mail', [])
-        message_number = int(message) - 1
-
-        if message_number < 0 or message_number >= len(mail):
-            send_message("Invalid message number. Please try again.", sender_id, interface)
+        success, result = validate_item_selection(message, mail, "message")
+        
+        if not success:
+            send_message(result, sender_id, interface)
             return
 
-        mail_id = mail[message_number][0]
+        mail_id = mail[result][0]
         sender_node_id = get_node_id_from_num(sender_id, interface)
         sender, date, subject, content, unique_id = get_mail_content(mail_id, sender_node_id)
         response = f"Date: {date}\nFrom: {sender}\nSubject: {subject}\n\n{content}"
         send_message(response, sender_id, interface)
+        time.sleep(3)
         send_message("What would you like to do with this message?\n[K]eep  [D]elete  [R]eply", sender_id, interface)
         update_user_state(sender_id, {'command': 'CHECK_MAIL', 'step': 2, 'mail_id': mail_id, 'unique_id': unique_id, 'sender': sender, 'subject': subject, 'content': content})
 
@@ -487,9 +643,7 @@ def handle_read_mail_command(sender_id, message, state, interface):
 
 def handle_delete_mail_confirmation(sender_id, message, state, interface, bbs_nodes):
     try:
-        choice = message.lower().strip()
-        if len(choice) == 2 and choice[1] == 'x':
-            choice = choice[0]
+        choice = normalize_message(message.lower().strip())
 
         if choice == 'd':
             unique_id = state['unique_id']
@@ -519,7 +673,7 @@ def handle_post_bulletin_command(sender_id, message, interface, bbs_nodes):
             return
 
         _, board_name, subject, content = parts
-        sender_short_name = get_node_short_name(get_node_id_from_num(sender_id, interface), interface)
+        sender_short_name = get_sender_short_name(sender_id, interface)
 
         unique_id = add_bulletin(board_name, sender_short_name, subject, content, bbs_nodes, interface)
         send_message(f"Your bulletin '{subject}' has been posted to {board_name}.", sender_id, interface)
@@ -562,13 +716,13 @@ def handle_check_bulletin_command(sender_id, message, interface):
 def handle_read_bulletin_command(sender_id, message, state, interface):
     try:
         bulletins = state.get('bulletins', [])
-        message_number = int(message) - 1
-
-        if message_number < 0 or message_number >= len(bulletins):
-            send_message("Invalid bulletin number. Please try again.", sender_id, interface)
+        success, result = validate_item_selection(message, bulletins, "bulletin")
+        
+        if not success:
+            send_message(result, sender_id, interface)
             return
 
-        bulletin_id = bulletins[message_number][0]
+        bulletin_id = bulletins[result][0]
         sender, date, subject, content, unique_id = get_bulletin_content(bulletin_id)
         response = f"Date: {date}\nFrom: {sender}\nSubject: {subject}\n\n{content}"
         send_message(response, sender_id, interface)
@@ -600,6 +754,17 @@ def handle_post_channel_command(sender_id, message, interface):
 
 
 def handle_check_channel_command(sender_id, interface):
+    """Display available channels for user to select and view."""
+    _handle_channel_list_command(sender_id, interface, 'CHECK_CHANNEL')
+
+
+def handle_list_channels_command(sender_id, interface):
+    """Display available channels for user to select and view."""
+    _handle_channel_list_command(sender_id, interface, 'LIST_CHANNELS')
+
+
+def _handle_channel_list_command(sender_id, interface, command_name):
+    """Helper function to handle channel listing logic."""
     try:
         channels = get_channels()
         if not channels:
@@ -612,23 +777,24 @@ def handle_check_channel_command(sender_id, interface):
         response += "\nPlease reply with the number of the channel you want to view."
         send_message(response, sender_id, interface)
 
-        update_user_state(sender_id, {'command': 'CHECK_CHANNEL', 'step': 1, 'channels': channels})
+        update_user_state(sender_id, {'command': command_name, 'step': 1, 'channels': channels})
 
     except Exception as e:
-        logging.error(f"Error processing check channel command: {e}")
-        send_message("Error processing check channel command.", sender_id, interface)
+        logging.error(f"Error processing {command_name.lower().replace('_', ' ')} command: {e}")
+        send_message(f"Error processing {command_name.lower().replace('_', ' ')} command.", sender_id, interface)
 
 
 def handle_read_channel_command(sender_id, message, state, interface):
+    """Read and display a specific channel's details."""
     try:
         channels = state.get('channels', [])
-        message_number = int(message) - 1
-
-        if message_number < 0 or message_number >= len(channels):
-            send_message("Invalid channel number. Please try again.", sender_id, interface)
+        success, result = validate_item_selection(message, channels, "channel")
+        
+        if not success:
+            send_message(result, sender_id, interface)
             return
 
-        channel_name, channel_url = channels[message_number]
+        channel_name, channel_url = channels[result]
         response = f"Channel Name: {channel_name}\nChannel URL: {channel_url}"
         send_message(response, sender_id, interface)
 
@@ -641,27 +807,533 @@ def handle_read_channel_command(sender_id, message, state, interface):
         send_message("Error processing read channel command.", sender_id, interface)
 
 
-def handle_list_channels_command(sender_id, interface):
-    try:
-        channels = get_channels()
-        if not channels:
-            send_message("No channels available in the directory.", sender_id, interface)
-            return
-
-        response = "Available Channels:\n"
-        for i, channel in enumerate(channels):
-            response += f"{i+1:02d}. Name: {channel[0]}\n"
-        response += "\nPlease reply with the number of the channel you want to view."
-        send_message(response, sender_id, interface)
-
-        update_user_state(sender_id, {'command': 'LIST_CHANNELS', 'step': 1, 'channels': channels})
-
-    except Exception as e:
-        logging.error(f"Error processing list channels command: {e}")
-        send_message("Error processing list channels command.", sender_id, interface)
-
-
 def handle_quick_help_command(sender_id, interface):
-    response = ("✈️QUICK COMMANDS✈️\nSend command below for usage info:\nSM,, - Send "
-                "Mail\nCM - Check Mail\nPB,, - Post Bulletin\nCB,, - Check Bulletins\n")
+    response_part_one = ("✈️QUICK COMMANDS✈️\nSend command below for usage info:\n"
+                "SM,, - Send Mail\nCM - Check Mail\nPB,, - Post Bulletin\nCB,, - Check Bulletins")
+    response_part_two = (   
+                "TT - Top MQTT Topics\nWX - Weather (WX or WX,location)\nQA - Quick Announcement\nN,, - Node Info")
+    send_message(response_part_one, sender_id, interface)
+    time.sleep(3)
+    send_message(response_part_two, sender_id, interface)
+
+
+def get_channel_list(interface):
+    """
+    Retrieve the list of channels from the Meshtastic device.
+    
+    Args:
+        interface: The Meshtastic interface object
+        
+    Returns:
+        list: List of channel dictionaries with channel information
+    """
+    try:
+        channels = []
+        
+        # Access channels from the local node
+        if hasattr(interface, 'localNode') and hasattr(interface.localNode, 'channels'):
+            for idx, channel in enumerate(interface.localNode.channels):
+                if channel.settings and (channel.settings.name or idx == 0):
+                    channel_info = {
+                        'index': idx,
+                        'name': channel.settings.name if channel.settings.name else f"Channel {idx}",
+                        'role': channel.role
+                    }
+                    channels.append(channel_info)
+        
+        return channels
+    except Exception as e:
+        logging.error(f"Error retrieving channels: {e}")
+        return []
+
+
+def handle_announcement_command(sender_id, interface):
+    """Handle the announcement command - shows available channels."""
+    try:
+        channels = get_channel_list(interface)
+        
+        if not channels:
+            send_message("❌ No channels available on device.", sender_id, interface)
+            handle_help_command(sender_id, interface, 'utilities')
+            return
+        
+        # Send header message first
+        send_message("� ANNOUNCEMENT 📣\nSelect a channel to broadcast to:", sender_id, interface)
+        time.sleep(3)
+        
+        # Split channels into two messages
+        mid_point = (len(channels) + 1) // 2
+        
+        # First half of channels
+        response1 = ""
+        for channel in channels[:mid_point]:
+            if channel['name'] == "Channel 0":
+                display_name = "Default"
+            else:
+                display_name = channel['name']
+
+            response1 += f"[{channel['index']}] {display_name}\n"
+        send_message(response1.strip(), sender_id, interface)
+        time.sleep(3)
+        
+        # Second half of channels
+        response2 = ""
+        for channel in channels[mid_point:]:
+            if channel['name'] == "Channel 0":
+                display_name = "Default"
+            else:
+                display_name = channel['name']
+            response2 += f"[{channel['index']}] {display_name}\n"
+        send_message(response2.strip(), sender_id, interface)
+        time.sleep(3)
+        
+        # Send instructions as separate message
+        send_message("Reply with channel number or X to cancel", sender_id, interface)
+        
+        update_user_state(sender_id, {'command': 'ANNOUNCEMENT', 'step': 1, 'channels': channels})
+        
+    except Exception as e:
+        logging.error(f"Error in announcement command: {e}")
+        send_message("❌ Error retrieving channels.", sender_id, interface)
+        handle_help_command(sender_id, interface, 'utilities')
+
+
+def handle_announcement_steps(sender_id, message, step, state, interface):
+    """Handle the multi-step announcement process."""
+    message_lower = message.lower().strip()
+    
+    try:
+        if step == 1:
+            # Channel selection
+            if message_lower == 'x':
+                send_message("Announcement cancelled.", sender_id, interface)
+                handle_help_command(sender_id, interface, 'utilities')
+                return
+            
+            try:
+                channel_idx = int(message.strip())
+                channels = state.get('channels', [])
+                
+                # Validate channel selection
+                selected_channel = next((ch for ch in channels if ch['index'] == channel_idx), None)
+                
+                if not selected_channel:
+                    send_message("Invalid channel number. Please try again or send X to cancel.", sender_id, interface)
+                    return
+                
+                send_message(f"Selected: {selected_channel['name']}\nEnter your announcement message.\nType END on a new line when finished.", sender_id, interface)
+                update_user_state(sender_id, {
+                    'command': 'ANNOUNCEMENT',
+                    'step': 2,
+                    'channel_idx': channel_idx,
+                    'channel_name': selected_channel['name'],
+                    'message': ''
+                })
+                
+            except ValueError:
+                send_message("Invalid input. Please enter a channel number or X to cancel.", sender_id, interface)
+                return
+        
+        elif step == 2:
+            # Message input
+            if message_lower == 'end':
+                announcement_text = state.get('message', '').strip()
+                
+                if not announcement_text:
+                    send_message("No message entered. Announcement cancelled.", sender_id, interface)
+                    handle_help_command(sender_id, interface, 'utilities')
+                    return
+                
+                # Show preview and ask for confirmation
+                channel_name = state.get('channel_name', 'Unknown')
+                preview = f"� PREVIEW 📣\nChannel: {channel_name}\n---\n{announcement_text}\n---\nSend this? [Y]es or [N]o"
+                send_message(preview, sender_id, interface)
+                update_user_state(sender_id, {
+                    'command': 'ANNOUNCEMENT',
+                    'step': 3,
+                    'channel_idx': state['channel_idx'],
+                    'channel_name': channel_name,
+                    'message': announcement_text
+                })
+            else:
+                # Accumulate message
+                current_message = state.get('message', '')
+                if current_message:
+                    current_message += '\n'
+                current_message += message
+                
+                state['message'] = current_message
+                update_user_state(sender_id, state)
+        
+        elif step == 3:
+            # Confirmation
+            if message_lower == 'y':
+                channel_idx = state.get('channel_idx')
+                announcement_text = state.get('message', '')
+                
+                # Prepend "ANNOUNCEMENT: " to the message
+                announcement_text = f"📢 ANNOUNCEMENT 📢 {announcement_text}"
+                
+                # Send the announcement using utility function
+                success, error = send_announcement(interface, channel_idx, announcement_text)
+                
+                if not success:
+                    send_message(f"❌ {error}", sender_id, interface)
+                    update_user_state(sender_id, None)
+                    return
+                
+                send_message("✅ Announcement sent successfully!", sender_id, interface)
+                update_user_state(sender_id, None)
+                
+            elif message_lower == 'n':
+                send_message("Announcement cancelled.", sender_id, interface)
+                handle_help_command(sender_id, interface, 'utilities')
+            else:
+                send_message("Please reply with Y to send or N to cancel.", sender_id, interface)
+                
+    except Exception as e:
+        logging.error(f"Error in announcement steps: {e}")
+        send_message(f"❌ Error processing announcement: {e}", sender_id, interface)
+        update_user_state(sender_id, None)
+
+
+def handle_quick_announcement_command(sender_id, interface):
+    """Send the configured quick announcement message to the configured channel."""
+    try:
+        
+        # Get quick announcement configuration from [announcement] section
+        announcement_channel = config.getint('announcement', 'default_announcement_channel', fallback=0)
+        announcement_message = config.get('announcement', 'default_message', fallback='BBS Announcement')
+        
+        # Validate that the channel exists
+        channels = get_channel_list(interface)
+        channel_exists = any(ch['index'] == announcement_channel for ch in channels)
+        channel_name = next((ch['name'] for ch in channels if ch['index'] == announcement_channel), "Unknown")
+        if not channel_exists:
+            available = ", ".join([f"{ch['index']} ({ch['name']})" for ch in channels])
+            send_message(f"❌ Channel {announcement_channel} ({channel_name}) not found.\nAvailable channels: {available}", sender_id, interface)
+            return
+        
+        # Prepend announcement prefix to the message
+        announcement_text = f"📣 ANNOUNCEMENT 📣 {announcement_message}"
+
+        # Send the announcement using utility function
+        success, error = send_announcement(interface, announcement_channel, announcement_text)
+        
+        if not success:
+            send_message(f"❌ {error}", sender_id, interface)
+            update_user_state(sender_id, None)
+            return
+        
+        logging.info(f"Sent quick announcement to channel {announcement_channel} ({channel_name})")
+        
+        # Confirm success
+        time.sleep(3)
+        send_message("✅ Announcement sent successfully!", sender_id, interface)
+        
+    except Exception as e:
+        logging.error(f"Error in quick announcement command: {e}")
+        send_message(f"❌ Error sending announcement: {e}", sender_id, interface)
+
+    update_user_state(sender_id, None)
+
+
+def convert_db_node_to_interface_format(db_node):
+    """
+    Convert a database node record to interface node format.
+    
+    Args:
+        db_node: Dictionary from database query
+    
+    Returns:
+        Dictionary in interface node format
+    """
+    return {
+        'num': db_node['num'],
+        'shortName': db_node['short_name'],
+        'longName': db_node['long_name']
+    }
+
+
+def find_nodes_by_shortname(short_name, interface):
+    """
+    Search for nodes by short name in both interface and database.
+    
+    Args:
+        short_name: Node short name (case-insensitive)
+        interface: Meshtastic interface object
+    
+    Returns:
+        Tuple of (nodes_list, from_database_bool)
+    """
+    # First try interface
+    nodes = get_node_info(interface, short_name.lower())
+    if nodes:
+        return nodes, False
+    
+    # If not in interface, try database
+    logging.info(f"Node '{short_name}' not in interface, checking database...")
+    db_nodes = get_node_by_shortname_from_db(short_name.lower())
+    if db_nodes:
+        # Convert to interface format
+        converted_nodes = [convert_db_node_to_interface_format(db_node) for db_node in db_nodes]
+        return converted_nodes, True
+    
+    return [], False
+
+
+def handle_quick_node_info_command(sender_id, message, interface):
+    """Handle quick node info command in format: N,,shortname"""
+    try:
+        parts = message.split(",,", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            send_message("Node Info Quick Command format:\nN,,{short_name}", sender_id, interface)
+            return
+        
+        _, short_name = parts
+        short_name = short_name.strip()
+        nodes, from_db = find_nodes_by_shortname(short_name, interface)
+        
+        if not nodes:
+            send_message(f"Node with short name '{short_name}' not found.", sender_id, interface)
+            return
+        
+        if len(nodes) > 1:
+            send_message(f"Multiple nodes found with short name '{short_name}':", sender_id, interface)
+            for node in nodes:
+                display_node_info(sender_id, node, interface)
+                time.sleep(3)
+            return
+        
+        # Single node found - display info
+        display_node_info(sender_id, nodes[0], interface)
+        
+    except Exception as e:
+        logging.error(f"Error processing quick node info command: {e}")
+        send_message("Error processing node info command.", sender_id, interface)
+
+
+def handle_node_info_command(sender_id, interface):
+    """Handle the node info command - prompts user for a node short name."""
+    send_message("🔍NODE INFO🔍\nEnter the short name of the node to look up:", sender_id, interface)
+    update_user_state(sender_id, {'command': 'NODE_INFO', 'step': 1})
+
+
+def handle_node_info_steps(sender_id, message, step, interface):
+    """Handle the node info lookup process."""
+    message_strip = message.strip()
+    
+    if step == 1:
+        short_name = message_strip
+        nodes, from_db = find_nodes_by_shortname(short_name, interface)
+        
+        if not nodes:
+            send_message(f"Node with short name '{short_name}' not found.", sender_id, interface)
+            handle_help_command(sender_id, interface, 'utilities')
+            return
+        
+        if len(nodes) > 1:
+            send_message(f"Multiple nodes found with short name '{short_name}':", sender_id, interface)
+            for idx, node in enumerate(nodes):
+                send_message(f"[{idx}] {node['longName']}", sender_id, interface)
+            send_message("Reply with the number to view details or X to cancel.", sender_id, interface)
+            update_user_state(sender_id, {'command': 'NODE_INFO', 'step': 2, 'nodes': nodes})
+            return
+        
+        # Single node found - display info
+        display_node_info(sender_id, nodes[0], interface)
+        handle_help_command(sender_id, interface, 'utilities')
+    
+    elif step == 2:
+        if message_strip.lower() == 'x':
+            handle_help_command(sender_id, interface, 'utilities')
+            return
+        
+        try:
+            selection = int(message_strip)
+            state = get_user_state(sender_id)
+            nodes = state.get('nodes', [])
+            
+            if 0 <= selection < len(nodes):
+                display_node_info(sender_id, nodes[selection], interface)
+            else:
+                send_message("Invalid selection.", sender_id, interface)
+            
+            handle_help_command(sender_id, interface, 'utilities')
+        except ValueError:
+            send_message("Invalid input. Please enter a number or X to cancel.", sender_id, interface)
+
+
+def get_node_db_info(node_id_str, short_name):
+    """
+    Get node information from database, trying by node_id first, then by short_name.
+    
+    Args:
+        node_id_str: Node ID string (e.g., '!0137af2d')
+        short_name: Node short name
+    
+    Returns:
+        Tuple of (db_node_info dict or None, effective_node_id_str)
+    """
+    db_node_info = None
+    effective_node_id_str = node_id_str
+    
+    # Try by node_id first
+    if node_id_str:
+        try:
+            db_node_info = get_node_from_db(node_id_str)
+            logging.info(f"Database lookup for {node_id_str}: {'Found' if db_node_info else 'Not found'}")
+            if db_node_info:
+                logging.debug(f"DB node info: {db_node_info}")
+        except Exception as e:
+            logging.error(f"Error retrieving node from database: {e}")
+    else:
+        logging.warning(f"Could not get node_id_str for node")
+    
+    # If not found by node_id, try by short_name
+    if not db_node_info:
+        try:
+            db_nodes = get_node_by_shortname_from_db(short_name)
+            if db_nodes:
+                db_node_info = db_nodes[0]  # Take the first match
+                effective_node_id_str = db_node_info.get('node_id')
+                logging.info(f"Found node in database by short name: {effective_node_id_str}")
+        except Exception as e:
+            logging.error(f"Error searching database by short name: {e}")
+    
+    return db_node_info, effective_node_id_str
+
+
+def display_node_info(sender_id, node, interface):
+    """Display detailed information about a node."""
+    from datetime import datetime
+    
+    node_id = node['num']
+    short_name = node['shortName']
+    long_name = node['longName']
+    
+    # Get full node info from interface
+    node_id_str = get_node_id_from_num(node_id, interface)
+    full_node_info = interface.nodes.get(node_id_str)
+    
+    # Get node info from database (tries by node_id, then by short_name)
+    db_node_info, node_id_str = get_node_db_info(node_id_str, short_name)
+    
+    info_lines = []
+    info_lines.append(f"📡 Node Info: {short_name} 📡")
+    info_lines.append(f"Long Name: {long_name}")
+    info_lines.append(f"Short Name: {short_name}")
+    if node_id_str:
+        info_lines.append(f"Node ID: {node_id_str}")
+    
+    # Collect data from interface (current) and database (historical/fallback)
+    hw_model = None
+    role = None
+    battery_level = None
+    voltage = None
+    channel_util = None
+    air_util_tx = None
+    temp = None
+    lat = None
+    lon = None
+    last_heard = None
+    snr = None
+    
+    # Get data from interface if available
+    if full_node_info:
+        hw_model = full_node_info.get('user', {}).get('hwModel')
+        role = full_node_info.get('user', {}).get('role')
+        
+        metrics = full_node_info.get('deviceMetrics', {})
+        if metrics:
+            battery_level = metrics.get('batteryLevel')
+            voltage = metrics.get('voltage')
+            channel_util = metrics.get('channelUtilization')
+            air_util_tx = metrics.get('airUtilTx')
+            temp = metrics.get('temperature')
+        
+        position = full_node_info.get('position', {})
+        lat = position.get('latitude')
+        lon = position.get('longitude')
+        
+        last_heard = full_node_info.get('lastHeard')
+        snr = full_node_info.get('snr')
+    
+    # Use database as fallback or supplement
+    if db_node_info:
+        if hw_model is None:
+            hw_model = db_node_info.get('hw_model')
+        if role is None:
+            role = db_node_info.get('role')
+        if battery_level is None:
+            battery_level = db_node_info.get('battery_level')
+        if voltage is None:
+            voltage = db_node_info.get('voltage')
+        if channel_util is None:
+            channel_util = db_node_info.get('channel_utilization')
+        if air_util_tx is None:
+            air_util_tx = db_node_info.get('air_util_tx')
+        if temp is None:
+            temp = db_node_info.get('temperature')
+        if lat is None:
+            lat = db_node_info.get('latitude')
+        if lon is None:
+            lon = db_node_info.get('longitude')
+        if last_heard is None:
+            last_heard = db_node_info.get('last_heard')
+        if snr is None:
+            snr = db_node_info.get('snr')
+    
+    # Display collected data
+    if hw_model and hw_model != 'Unknown':
+        info_lines.append(f"Hardware: {hw_model}")
+    
+    if role and role != 'Unknown':
+        info_lines.append(f"Role: {role}")
+    
+    if battery_level is not None:
+        info_lines.append(f"Battery: {battery_level}%")
+    
+    if voltage is not None:
+        info_lines.append(f"Voltage: {voltage:.2f}V")
+    
+    if channel_util is not None:
+        info_lines.append(f"Ch. Util: {channel_util:.1f}%")
+    
+    if air_util_tx is not None:
+        info_lines.append(f"Air Util TX: {air_util_tx:.1f}%")
+    
+    if temp is not None:
+        info_lines.append(f"Temp: {temp:.1f}°C")
+    
+    if last_heard:
+        current_time = int(time.time())
+        time_diff = current_time - last_heard
+        
+        if time_diff < 60:
+            time_str = f"{time_diff} sec ago"
+        elif time_diff < 3600:
+            time_str = f"{time_diff // 60} min ago"
+        elif time_diff < 86400:
+            time_str = f"{time_diff // 3600} hr ago"
+        else:
+            time_str = f"{time_diff // 86400} days ago"
+        
+        info_lines.append(f"Last Heard: {time_str}")
+    
+    if snr is not None:
+        info_lines.append(f"SNR: {snr:.1f} dB")
+    
+    if lat is not None and lon is not None:
+        info_lines.append(f"Location: {lat:.4f}, {lon:.4f}")
+    
+    # Additional info from database only
+    if db_node_info:
+        # First seen timestamp
+        if db_node_info.get('first_seen'):
+            first_seen_dt = datetime.fromtimestamp(db_node_info['first_seen'])
+            info_lines.append(f"First Seen: {first_seen_dt.strftime('%m/%d %H:%M')}")
+    
+    # Send the info
+    response = "\n".join(info_lines)
     send_message(response, sender_id, interface)

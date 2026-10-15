@@ -4,15 +4,17 @@ from meshtastic import BROADCAST_NUM
 
 from command_handlers import (
     handle_mail_command, handle_bulletin_command, handle_help_command, handle_stats_command, handle_fortune_command,
-    handle_bb_steps, handle_mail_steps, handle_stats_steps, handle_wall_of_shame_command,
+    handle_bb_steps, handle_mail_steps, handle_stats_steps, handle_wall_of_shame_command, handle_weather_command,
     handle_channel_directory_command, handle_channel_directory_steps, handle_send_mail_command,
     handle_read_mail_command, handle_check_mail_command, handle_delete_mail_confirmation, handle_post_bulletin_command,
     handle_check_bulletin_command, handle_read_bulletin_command, handle_read_channel_command,
-    handle_post_channel_command, handle_list_channels_command, handle_quick_help_command
+    handle_post_channel_command, handle_list_channels_command, handle_quick_help_command, handle_mqtt_topics_command,
+    handle_announcement_command, handle_announcement_steps, handle_quick_announcement_command,
+    handle_node_info_command, handle_node_info_steps, handle_quick_node_info_command
 )
-from db_operations import add_bulletin, add_mail, delete_bulletin, delete_mail, get_db_connection, add_channel
+from db_operations import add_bulletin, add_mail, delete_bulletin, delete_mail, get_db_connection, add_channel, upsert_node_info
 from js8call_integration import handle_js8call_command, handle_js8call_steps, handle_group_message_selection
-from utils import get_user_state, get_node_short_name, get_node_id_from_num, send_message
+from utils import get_user_state, get_node_short_name, get_node_id_from_num, send_message, normalize_message, send_urgent_bulletin_notification
 
 main_menu_handlers = {
     "q": handle_quick_help_command,
@@ -34,6 +36,10 @@ utilities_menu_handlers = {
     "s": handle_stats_command,
     "f": handle_fortune_command,
     "w": handle_wall_of_shame_command,
+    "t": handle_mqtt_topics_command,
+    "r": handle_weather_command,
+    "a": handle_announcement_command,
+    "n": handle_node_info_command,
     "x": handle_help_command
 }
 
@@ -60,9 +66,9 @@ def process_message(sender_id, message, interface, is_sync_message=False):
 
     bbs_nodes = interface.bbs_nodes
 
-    # Handle repeated characters for single character commands using a prefix
-    if len(message_lower) == 2 and message_lower[1] == 'x':
-        message_lower = message_lower[0]
+    # Handle repeated characters for single character commands using normalize_message
+    # But exclude quick commands like WX
+    message_lower = normalize_message(message_lower, exclude=['wx'])
 
     if is_sync_message:
         if message.startswith("BULLETIN|"):
@@ -71,8 +77,7 @@ def process_message(sender_id, message, interface, is_sync_message=False):
             add_bulletin(board, sender_short_name, subject, content, [], interface, unique_id=unique_id)
 
             if board.lower() == "urgent":
-                notification_message = f"💥NEW URGENT BULLETIN💥\nFrom: {sender_short_name}\nTitle: {subject}\nDM 'CB,,Urgent' to view"
-                send_message(notification_message, BROADCAST_NUM, interface)
+                send_urgent_bulletin_notification(sender_short_name, subject, interface)
         elif message.startswith("MAIL|"):
             parts = message.split("|")
             sender_id, sender_short_name, recipient_id, subject, content, unique_id = parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
@@ -102,6 +107,19 @@ def process_message(sender_id, message, interface, is_sync_message=False):
             handle_post_channel_command(sender_id, message_strip, interface)
         elif message_lower.startswith("chl"):
             handle_list_channels_command(sender_id, interface)
+        elif message_lower.startswith("tt"):
+            handle_mqtt_topics_command(sender_id, interface)
+        elif message_lower.startswith("wx"):
+            # Parse WX command: WX or WX,location
+            if len(message_strip) > 2 and message_strip[2] == ',':
+                location = message_strip[3:].strip()
+                handle_weather_command(sender_id, interface, location)
+            else:
+                handle_weather_command(sender_id, interface)
+        elif message_lower.startswith("qa"):
+            handle_quick_announcement_command(sender_id, interface)
+        elif message_lower.startswith("n,,"):
+            handle_quick_node_info_command(sender_id, message_strip, interface)
         else:
             if state and state['command'] == 'MENU':
                 menu_name = state['menu']
@@ -170,6 +188,10 @@ def process_message(sender_id, message, interface, is_sync_message=False):
                     handle_js8call_steps(sender_id, message, step, interface, state)
                 elif command == 'GROUP_MESSAGES':
                     handle_group_message_selection(sender_id, message, step, state, interface)
+                elif command == 'ANNOUNCEMENT':
+                    handle_announcement_steps(sender_id, message, step, state, interface)
+                elif command == 'NODE_INFO':
+                    handle_node_info_steps(sender_id, message, step, interface)
                 else:
                     handle_help_command(sender_id, interface)
             else:
@@ -178,6 +200,15 @@ def process_message(sender_id, message, interface, is_sync_message=False):
 
 def on_receive(packet, interface):
     try:
+        # Update node info in database whenever we receive a packet
+        if 'fromId' in packet:
+            node_id = packet['fromId']
+            if node_id in interface.nodes:
+                try:
+                    upsert_node_info(node_id, interface.nodes[node_id])
+                except Exception as e:
+                    logging.error(f"Error updating node info for {node_id}: {e}")
+        
         if 'decoded' in packet and packet['decoded']['portnum'] == 'TEXT_MESSAGE_APP':
             message_bytes = packet['decoded']['payload']
             message_string = message_bytes.decode('utf-8')
