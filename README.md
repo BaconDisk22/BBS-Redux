@@ -285,7 +285,7 @@ python monitor_mqtt_topics.py --base-topic msh/US/CA --log-level DEBUG
 **Viewing Statistics**:
 - Send `TT` as a quick command, or
 - Access via Utilities menu → [T]op MQTT Topics
-- Shows the top 15 most active topics from the monitoring database
+- Shows the top 15 most active topics from the monitoring database, with the configured `base_topic` trimmed off each name
 
 **Running Monitor Automatically at Boot**:
 
@@ -325,13 +325,45 @@ To have the MQTT monitor script automatically start at boot:
 
 Broadcast messages to specific channels configured on your Meshtastic device.
 
+**Configuration** (`config.ini`):
+
+```ini
+[announcement]
+default_announcement_channel = 0
+default_message = Hello!  I am TC²-BBS.
+admin_nodes = !17d7e4b7,!18e9f5a3
+```
+
+- **admin_nodes**: the nodes allowed to announce. If it's empty, the `[allow_list]` Urgent board list is used instead. If both are empty, **any node** can broadcast to your channels.
+- **default_announcement_channel** / **default_message**: what the `QA` quick command sends.
+
 **Usage**:
 1. Access via Utilities menu → [A]nnouncement
 2. Select the channel number you want to broadcast to
-3. Type your message
-4. Message will be sent to all devices monitoring that channel
+3. Type your message, one line per message, then send `END`
+4. Check the preview and reply `Y` to send it to everyone on that channel
 
-This is useful for making network-wide announcements or alerting specific groups.
+Or send `QA` for the configured message, or `QA,,your text` to send your own text, to the configured channel.
+
+An announcement goes out as a single packet. Including the `📢 ANNOUNCEMENT 📢` prefix, it must fit in 200 bytes (an emoji counts as 4).
+
+### Node Info
+
+The BBS remembers every node it hears in `nodes.db` (see [NODE_TRACKING.md](NODE_TRACKING.md)), so you can look up a node even after it drops off the mesh.
+
+- Access via Utilities menu → [N]ode Info, then send a short name
+- Or send `N,,<short_name>`
+
+### Startup Announcement
+
+```ini
+[startup]
+enabled = True
+channel_index = 0
+message = TC²-BBS is online and ready!
+```
+
+When enabled, the BBS broadcasts this message on the channel 10 seconds after it starts.
 
 ### JS8Call Integration
 
@@ -376,6 +408,8 @@ For faster access, you can use these shortcut commands without navigating throug
 - **TT** - Show Top MQTT Topics
 - **WX** - Get weather for default location
 - **WX,**`<location>` - Get weather for specific location (e.g., `WX,90210` or `WX,Paris,FR`)
+- **N,,**`<short_name>` - Node Info
+- **QA** - Quick Announcement (admins only; `QA,,<text>` sends your own text)
 
 Send **Q** from the main menu to see the quick command reference on your device.
 

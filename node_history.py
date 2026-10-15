@@ -133,6 +133,10 @@ class NodeHistory:
         rows = self._rows("SELECT * FROM nodes WHERE node_id = ?", (node_id,))
         return rows[0] if rows else None
 
+    def all(self):
+        """Every remembered node, most recently heard first."""
+        return self._rows("SELECT * FROM nodes ORDER BY last_heard DESC")
+
     def by_short_name(self, short_name):
         """Every remembered node answering to a short name, most recent first."""
         return self._rows("SELECT * FROM nodes WHERE LOWER(short_name) = LOWER(?) "

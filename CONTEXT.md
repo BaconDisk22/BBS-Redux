@@ -88,6 +88,23 @@ Where a record came from — created by a local Node, or arrived from a peer BBS
 Node. A record that arrived from a peer is never synced back out.
 _Avoid_: source, direction.
 
+### Utilities
+
+**Announcement**:
+A message broadcast on one of this BBS's own radio channels, to everyone
+listening on it. Only admins may send one (see [announcement] admin_nodes).
+_Avoid_: broadcast (that is the Urgent notify), alert.
+
+**Mesh Channel**:
+A channel slot on the BBS's radio, by index — where an Announcement goes. Not a
+Channel Directory entry.
+_Avoid_: channel (ambiguous here — that word means a Directory entry).
+
+**Node History**:
+The BBS's memory of every Node it has heard, kept after the Node leaves the
+live roster. Node Info reads it to fill gaps.
+_Avoid_: node database, cache.
+
 ### JS8Call bridge
 
 **Station**:

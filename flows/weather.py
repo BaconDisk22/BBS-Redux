@@ -11,8 +11,6 @@ weather.py), so the tests hand in a fake and never touch the network.
 import weather as service
 from flows.base import keep
 
-QUICK_USAGE = "Weather Quick Command format:\nWX or WX,{zip or city,state,country}"
-
 _ERRORS = {
     service.UNCONFIGURED: "⚠️ Weather service not configured. Please set API key in config.ini",
     service.BAD_KEY: "⚠️ Invalid API key. Please check config.ini",
