@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flows.base import Deps, Stay, Enter
 from flows.navigation import (
-    BBS_TITLE, NavigationFlow, QUICK_HELP, UTILITIES_TITLE, build_menu,
+    BBS_TITLE, NavigationFlow, QUICK_HELP, UTILITIES_TITLE, UTILITY_QUICK_HELP, build_menu,
 )
 from settings import Menus
 
@@ -68,7 +68,7 @@ def test_show_bbs_and_utilities():
 
 def test_main_quick_help_stays_put():
     r = NavigationFlow().advance("q", MAIN, deps())
-    assert r.replies == [QUICK_HELP]
+    assert r.replies == [QUICK_HELP, UTILITY_QUICK_HELP]
     assert r.outcome == Stay(MAIN)
 
 
@@ -84,7 +84,7 @@ def test_main_unknown_reshows_main():
 
 def test_no_state_is_treated_as_main_menu():
     r = NavigationFlow().advance("q", {}, deps())
-    assert r.replies == [QUICK_HELP]
+    assert r.replies == [QUICK_HELP, UTILITY_QUICK_HELP]
 
 
 # --- bbs menu: hand-offs ---------------------------------------------------

@@ -34,6 +34,30 @@ class Deps:
     js8: Any = None                              # Js8Database — what the JS8Call bridge heard
     menus: Any = None                            # settings.Menus — which letters each menu offers
     fortunes: List[str] = field(default_factory=list)
+    channels: List[Any] = field(default_factory=list)   # MeshChannel slots configured on the radio
+    announcement: Any = None                     # settings.AnnouncementConfig
+    weather: Any = None                          # weather service: current(location) -> report
+    topics: Any = None                           # MQTT topic counts: top(limit) -> rows | None
+    node_history: Any = None                     # NodeHistory — nodes the BBS has heard before
+    mqtt_base_topic: str = ""                    # prefix trimmed when listing MQTT topics
+
+
+@dataclass(frozen=True)
+class MeshChannel:
+    """A channel slot on this BBS's own radio, as a send destination.
+
+    Not a Channel Directory entry: this is where an Announcement goes. Used as
+    the destination of a notification, it means "broadcast on that slot"; only
+    the Transport knows how to do that, so a flow can name it and stay pure.
+    """
+
+    index: int
+    name: str = ""
+
+    @property
+    def label(self):
+        """Index 0 is the primary channel; unnamed it shows as Default."""
+        return self.name or ("Default" if self.index == 0 else f"Channel {self.index}")
 
 
 #: A Node absent from the roster, or without a short name, cannot be named as

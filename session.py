@@ -18,13 +18,17 @@ clearing a global (see docs/adr/0004).
 import re
 import time
 
+from flows.announcement import AnnouncementFlow
 from flows.base import GOTO_MAIN, Stay, End, Keep, Goto, Enter
 from flows.bulletin import BulletinFlow
 from flows.channel import ChannelFlow
 from flows.js8 import Js8Flow
 from flows.mail import MailFlow
 from flows.navigation import NavigationFlow
+from flows.node_info import NodeInfoFlow
 from flows.stats import StatsFlow
+from flows.topics import TopicsFlow
+from flows.weather import WeatherFlow
 
 #: How long a bulletin post or mail send may sit idle, mid-compose, before
 #: check_timeouts finishes it for the node — posted if there's content,
@@ -51,7 +55,8 @@ def _is_composing(state):
 
 
 def _default_flows():
-    return [NavigationFlow(), StatsFlow(), BulletinFlow(), MailFlow(), ChannelFlow(), Js8Flow()]
+    return [NavigationFlow(), StatsFlow(), BulletinFlow(), MailFlow(), ChannelFlow(), Js8Flow(),
+            WeatherFlow(), TopicsFlow(), AnnouncementFlow(), NodeInfoFlow()]
 
 
 class Session:
@@ -74,7 +79,10 @@ class Session:
         self._quick_prefixes = sorted(self._quick, key=len, reverse=True)
         # The bare command word, args stripped, for prefixes that take args
         # ("pb,," -> "pb") — precomputed once, alongside _quick_prefixes above.
-        self._quick_bare = {p: p[:-2] for p in self._quick_prefixes if p.endswith(",,")}
+        # A one-letter word is never taken bare: "N" alone is a menu choice
+        # (News, Nodes, No), so "n,," only acts when its ",," is typed.
+        self._quick_bare = {p: p[:-2] for p in self._quick_prefixes
+                            if p.endswith(",,") and len(p) > 3}
         # A typo'd separator still reads as an attempt at the command: the bare
         # word immediately followed by a comma (e.g. "PB, , General,,..." has a
         # stray space breaking the "pb,," prefix, but is still clearly a PB).

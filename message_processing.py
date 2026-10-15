@@ -30,7 +30,29 @@ def _build_deps(sender_id, transport, runtime):
         js8=runtime.js8_database,
         menus=config.menus,
         fortunes=config.fortunes,
+        channels=getattr(transport, "channels", []),
+        announcement=config.announcement,
+        weather=runtime.weather,
+        topics=runtime.topics,
+        node_history=runtime.node_history,
+        mqtt_base_topic=config.mqtt_topics.base_topic,
     )
+
+
+def remember_sender(packet, transport, runtime):
+    """Refresh the sender's row in NodeHistory from the live roster — on every
+    packet, not just text, so telemetry and position updates are kept too."""
+    history = runtime.node_history
+    node_id = packet.get('fromId')
+    if history is None or node_id is None:
+        return
+    node = transport.nodes.get(node_id)
+    if node is None:
+        return
+    try:
+        history.record(node_id, node)
+    except Exception as error:
+        logging.error(f"Error updating node history for {node_id}: {error}")
 
 
 def process_message(sender_id, message, transport, runtime, is_sync_message=False):
@@ -65,6 +87,8 @@ def check_timeouts(transport, runtime):
 def on_receive(packet, interface, runtime):
     """The one place that meets the meshtastic interface and wraps it."""
     try:
+        transport = MeshtasticTransport(interface, pacing_seconds=runtime.config.message_delay)
+        remember_sender(packet, transport, runtime)
         if 'decoded' in packet and packet['decoded']['portnum'] == 'TEXT_MESSAGE_APP':
             message_bytes = packet['decoded']['payload']
             message_string = message_bytes.decode('utf-8')
@@ -72,7 +96,6 @@ def on_receive(packet, interface, runtime):
             to_id = packet.get('to')
             sender_node_id = packet['fromId']
 
-            transport = MeshtasticTransport(interface)
             nodes = transport.nodes
 
             sender_short_name = roster.short_name(nodes, sender_node_id)

@@ -13,6 +13,7 @@ in exactly one place, which is why every other Flow can simply say
 
 import random
 
+from flows import topics, weather
 from flows.base import stay, enter, GOTO_BBS, GOTO_MAIN, GOTO_UTILITIES
 
 MAIN_TITLE = "💾TC² BBS💾"
@@ -23,6 +24,11 @@ QUICK_HELP = ("✈️QUICK COMMANDS✈️\nSend command below for usage info:\nS
               "Mail\nCM - Check Mail\nPB,, - Post Bulletin\nCB,, - Check Bulletins\n"
               "CHP,, - Post Channel\nCHL - List Channels\n"
               "(',,' must be typed exactly - no spaces)\n")
+
+#: Sent as a second message — the first is already near one payload.
+UTILITY_QUICK_HELP = ("🛠️UTILITY COMMANDS🛠️\nWX - Weather (WX or WX,location)\n"
+                      "TT - Top MQTT Topics\nN,, - Node Info (N,,short_name)\n"
+                      "QA - Quick Announcement (admins)\n")
 
 _WALL_OF_SHAME_HEADER = "Devices with battery levels below 20%:\n"
 
@@ -52,6 +58,14 @@ def build_menu(items, title):
             menu += "[F]ortune\n"
         elif item == 'W':
             menu += "[W]all of Shame\n"
+        elif item == 'T':
+            menu += "[T]op MQTT Topics\n"
+        elif item == 'R':
+            menu += "Weathe[R]\n"
+        elif item == 'A':
+            menu += "[A]nnouncement\n"
+        elif item == 'N':
+            menu += "[N]ode Info\n"
     return menu
 
 
@@ -99,7 +113,7 @@ class NavigationFlow:
 
     def _main(self, choice, state, deps):
         if choice == "q":
-            return stay(state, replies=[QUICK_HELP])
+            return stay(state, replies=[QUICK_HELP, UTILITY_QUICK_HELP])
         if choice == "b":
             return self.show(GOTO_BBS, deps)
         if choice == "u":
@@ -124,6 +138,14 @@ class NavigationFlow:
             return stay(state, replies=[self._fortune(deps.fortunes)])
         if choice == "w":
             return stay(state, replies=[self._wall_of_shame(deps.roster)])
+        if choice == "t":
+            return stay(state, replies=topics.replies(deps))
+        if choice == "r":
+            return stay(state, replies=[weather.report(None, deps)])
+        if choice == "a":
+            return enter("ANNOUNCEMENT")
+        if choice == "n":
+            return enter("NODE_INFO")
         return self.show(GOTO_MAIN, deps)
 
     # --- leaves -----------------------------------------------------------

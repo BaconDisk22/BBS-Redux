@@ -15,6 +15,7 @@ import time
 from meshtastic import BROADCAST_NUM
 
 import roster
+from flows.base import MeshChannel
 
 #: Meshtastic will not carry more than this in one text payload.
 MAX_PAYLOAD = 200
@@ -43,6 +44,26 @@ class MeshtasticTransport:
         return self._interface.myInfo.my_node_num
 
     @property
+    def channels(self):
+        """The channel slots configured on this radio, as MeshChannels.
+
+        Index 0 (the primary) always counts; any other slot only once it has a
+        name — an unnamed secondary slot is unused. Best effort: a radio that
+        has not reported its channels yet answers with none.
+        """
+        try:
+            slots = self._interface.localNode.channels or []
+        except AttributeError:
+            return []
+        found = []
+        for index, slot in enumerate(slots):
+            settings = getattr(slot, "settings", None)
+            name = settings.name if settings else ""
+            if index == 0 or name:
+                found.append(MeshChannel(index=index, name=name))
+        return found
+
+    @property
     def is_connected(self):
         """Live off the interface, same as nodes/my_num — reconnect.Supervisor
         polls this to notice a dead connection the library's own
@@ -64,6 +85,9 @@ class MeshtasticTransport:
         self._interface = new_interface
 
     def send(self, text, destination):
+        if isinstance(destination, MeshChannel):
+            self._broadcast(text, destination)
+            return
         for chunk in chunks(text):
             try:
                 packet = self._interface.sendText(
@@ -80,6 +104,33 @@ class MeshtasticTransport:
             else:
                 self._log_sent(chunk, destination, packet)
             time.sleep(self._pacing_seconds)
+
+    def _broadcast(self, text, channel):
+        """One packet to everyone on a channel slot — an Announcement.
+
+        Never chunked: a half-delivered announcement reads as a different
+        message, so anything over one payload is refused (callers check first).
+        No ack — a broadcast has no single recipient to acknowledge it.
+        """
+        size = len(text.encode("utf-8"))
+        if size > MAX_PAYLOAD:
+            logging.error(f"Broadcast to channel {channel.index} is {size} bytes, "
+                          f"over the {MAX_PAYLOAD} limit; not sent.")
+            return
+        try:
+            self._interface.sendText(
+                text=text,
+                destinationId=BROADCAST_NUM,
+                channelIndex=channel.index,
+                wantAck=False,
+                wantResponse=False,
+            )
+        except Exception as error:
+            logging.warning(f"Broadcast to channel {channel.index} failed: {error}")
+        else:
+            shown = text.replace('\n', '\\n')
+            logging.info(f"Broadcast on channel {channel.index} ({channel.label}): \"{shown}\"")
+        time.sleep(self._pacing_seconds)
 
     def close(self):
         self._interface.close()

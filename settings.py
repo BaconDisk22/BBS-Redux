@@ -36,6 +36,46 @@ class Js8Config:
 
 
 @dataclass(frozen=True)
+class WeatherConfig:
+    """OpenWeatherMap access for the Weather utility. No key means no weather."""
+
+    api_key: Optional[str] = None
+    default_location: str = '48336'
+    units: str = 'imperial'
+
+
+@dataclass(frozen=True)
+class AnnouncementConfig:
+    """Channel broadcasts: who may send them, and what QA sends where.
+
+    `admins` empty falls back to the Urgent Allow List; both empty means any
+    Node may announce — the same "empty means anyone" rule the Allow List uses.
+    """
+
+    channel: int = 0
+    message: str = 'BBS Announcement'
+    admins: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class StartupConfig:
+    """An optional one-shot channel broadcast when the BBS comes online."""
+
+    enabled: bool = False
+    channel_index: int = 0
+    message: str = 'TC²-BBS is online and ready!'
+
+
+@dataclass(frozen=True)
+class MqttTopicsConfig:
+    """Where monitor_mqtt_topics.py writes its counts, and the base topic it
+    watches — the prefix trimmed off each topic when the BBS lists them."""
+
+    db_path: str = 'mqtt_counts.db'
+    base_topic: str = ''
+
+
+@dataclass(frozen=True)
 class Config:
     """Everything a running BBS reads from disk, resolved once."""
 
@@ -44,6 +84,11 @@ class Config:
     bbs_nodes: List[str] = field(default_factory=list)
     allowed_nodes: List[str] = field(default_factory=list)
     js8: Js8Config = field(default_factory=Js8Config)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
+    announcement: AnnouncementConfig = field(default_factory=AnnouncementConfig)
+    startup: StartupConfig = field(default_factory=StartupConfig)
+    mqtt_topics: MqttTopicsConfig = field(default_factory=MqttTopicsConfig)
+    message_delay: float = 4.0
 
 
 def _items(parser, section, option):
@@ -87,4 +132,34 @@ def load(config_file=DEFAULT_CONFIG_FILE, fortunes_file=FORTUNES_FILE):
             urgent=_items(parser, 'js8call', 'js8urgent'),
             store_messages=parser.getboolean('js8call', 'store_messages', fallback=True),
         ),
+        weather=WeatherConfig(
+            api_key=_api_key(parser.get('weather', 'api_key', fallback=None)),
+            default_location=parser.get('weather', 'default_location', fallback='48336').strip(),
+            units=parser.get('weather', 'units', fallback='imperial').strip(),
+        ),
+        announcement=AnnouncementConfig(
+            channel=parser.getint('announcement', 'default_announcement_channel', fallback=0),
+            message=parser.get('announcement', 'default_message', fallback='BBS Announcement'),
+            admins=_items(parser, 'announcement', 'admin_nodes'),
+        ),
+        startup=StartupConfig(
+            enabled=parser.getboolean('startup', 'enabled', fallback=False),
+            channel_index=parser.getint('startup', 'channel_index', fallback=0),
+            message=parser.get('startup', 'message', fallback='TC²-BBS is online and ready!'),
+        ),
+        mqtt_topics=MqttTopicsConfig(
+            db_path=parser.get('mqtt_monitor', 'db_path', fallback='mqtt_counts.db'),
+            base_topic=parser.get('mqtt_monitor', 'base_topic', fallback='').strip().rstrip('/'),
+        ),
+        message_delay=parser.getfloat('misc', 'message_delay', fallback=4.0),
     )
+
+
+def _api_key(raw):
+    """A key left at the example's placeholder is no key at all."""
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw or raw.lower() in ('your_api_key_here', 'your_api_key'):
+        return None
+    return raw
