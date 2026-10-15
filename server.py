@@ -13,15 +13,19 @@ other BBS servers listed in the config.ini file.
 """
 
 import logging
-import threading
 import time
 
+import settings
 from config_init import initialize_config, get_interface, init_cli_parser, merge_config
-from db_operations import initialize_database, initialize_nodes_database, sync_all_nodes_to_db
+from database import Database
+from js8_db import Js8Database
 from js8call_integration import JS8CallClient
-from message_processing import on_receive
+from message_processing import on_receive, check_timeouts
 from pubsub import pub
-from utils import send_startup_announcement
+from reconnect import Supervisor
+from runtime import Runtime
+from session import Session
+from transport import MeshtasticTransport
 
 # General logging
 logging.basicConfig(
@@ -51,33 +55,6 @@ Meshtastic Version
 """
     print(banner)
 
-
-def node_sync_worker(interface, sync_interval=300):
-    """
-    Background worker to periodically sync all nodes to the database.
-    
-    Args:
-        interface: The Meshtastic interface object
-        sync_interval: Interval in seconds between syncs (default: 300 = 5 minutes)
-    """
-    logging.info(f"Node sync worker started. Will sync every {sync_interval} seconds.")
-    
-    # Initial sync after a short delay to let interface populate
-    time.sleep(30)
-    try:
-        sync_all_nodes_to_db(interface)
-    except Exception as e:
-        logging.error(f"Error in initial node sync: {e}")
-    
-    # Periodic sync
-    while True:
-        try:
-            time.sleep(sync_interval)
-            sync_all_nodes_to_db(interface)
-        except Exception as e:
-            logging.error(f"Error in periodic node sync: {e}")
-
-
 def main():
     display_banner()
     args = init_cli_parser()
@@ -88,51 +65,45 @@ def main():
 
     merge_config(system_config, args)
 
+    config = settings.load(system_config['config_file'])
+    print(f"Configured to sync with the following BBS nodes: {config.bbs_nodes}")
+    print(f"Nodes with Urgent board permissions: {config.allowed_nodes}")
+
     interface = get_interface(system_config)
-    interface.bbs_nodes = system_config['bbs_nodes']
-    interface.allowed_nodes = system_config['allowed_nodes']
+    transport = MeshtasticTransport(interface)
+    supervisor = Supervisor(transport, lambda: get_interface(system_config))
+    pub.subscribe(supervisor.on_connection_lost, "meshtastic.connection.lost")
+    database = Database()
+    js8_database = Js8Database(config.js8.db_path)
+    runtime = Runtime(config=config, database=database,
+                      js8_database=js8_database, session=Session())
 
     logging.info(f"TC²-BBS is running on {system_config['interface_type']} interface...")
 
-    initialize_database()
-    initialize_nodes_database()
-
-    # Start background node sync worker
-    sync_thread = threading.Thread(target=node_sync_worker, args=(interface,), daemon=True)
-    sync_thread.start()
-    logging.info("Node sync background worker started")
+    database.initialize_schema()
+    print("Database schema initialized.")
 
     def receive_packet(packet, interface):
-        on_receive(packet, interface)
+        on_receive(packet, interface, runtime)
 
     pub.subscribe(receive_packet, system_config['mqtt_topic'])
 
-    # Initialize and start JS8Call Client if configured
-    js8call_client = JS8CallClient(interface)
+    # Initialize and start JS8Call Client if configured. It listens on its own
+    # thread, so this returns immediately and does nothing when unconfigured.
+    js8call_client = JS8CallClient(transport, config.js8, js8_database)
     js8call_client.logger = js8call_logger
-
-    if js8call_client.db_conn:
-        js8call_client.connect()
-
-    # Send startup announcement if configured
-    if system_config['startup_enabled']:
-        logging.info("Waiting 10 seconds before sending startup announcement...")
-        time.sleep(10)  # Wait for the interface to be fully ready
-        send_startup_announcement(
-            interface,
-            system_config['startup_channel_index'],
-            system_config['startup_message']
-        )
+    js8call_client.start()
 
     try:
         while True:
             time.sleep(1)
+            supervisor.check()
+            check_timeouts(transport, runtime)
 
     except KeyboardInterrupt:
         logging.info("Shutting down the server...")
-        interface.close()
-        if js8call_client.connected:
-            js8call_client.close()
+        transport.close()
+        js8call_client.close()
 
 if __name__ == "__main__":
     main()
