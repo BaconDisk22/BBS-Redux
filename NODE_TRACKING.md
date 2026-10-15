@@ -226,73 +226,61 @@ Last Updated:  2026-02-28 14:30:26
 
 ### Sync Interval
 
-By default, the background sync runs every 5 minutes (300 seconds). You can modify this in `server.py`:
+On top of recording each sender as its packets arrive, the server copies the
+whole live roster into the history every 5 minutes. Change
+`NODE_SYNC_SECONDS` in `server.py` to adjust it:
 
 ```python
-sync_thread = threading.Thread(
-    target=node_sync_worker, 
-    args=(interface, 600),  # Change to 600 for 10-minute intervals
-    daemon=True
-)
+NODE_SYNC_SECONDS = 600  # every 10 minutes
 ```
 
-### Initial Sync Delay
+The first full sync runs as soon as the server's main loop starts.
 
-The system waits 30 seconds after startup before performing the first sync. This allows the interface to populate with node data. Adjust if needed in `server.py`:
+## Database API
+
+Node history lives in `node_history.py` as a `NodeHistory` object. It owns
+`nodes.db`, the same way `Database` owns `bulletins.db`:
 
 ```python
-def node_sync_worker(interface, sync_interval=300):
-    time.sleep(30)  # Change this delay if needed
-    sync_all_nodes_to_db(interface)
-    ...
+from node_history import NodeHistory
+
+history = NodeHistory()          # nodes.db; NodeHistory(":memory:") for tests
+history.initialize_schema()
 ```
 
-## Database Functions
-
-### Available Functions
-
-The following functions are available in `db_operations.py`:
-
-#### `upsert_node_info(node_id, node_data)`
-Insert or update node information in the database.
+#### `history.record(node_id, node_data)`
+Insert or update one node from its roster entry. `first_seen` is set once and never moved.
 
 ```python
-from db_operations import upsert_node_info
-
-node_data = interface.nodes['!0137af2d']
-upsert_node_info('!0137af2d', node_data)
+history.record('!0137af2d', interface.nodes['!0137af2d'])
 ```
 
-#### `get_node_from_db(node_id)`
-Retrieve a specific node's information from the database.
+#### `history.by_id(node_id)`
+One node's row as a dict, or `None`.
 
 ```python
-from db_operations import get_node_from_db
-
-node = get_node_from_db('!0137af2d')
+node = history.by_id('!0137af2d')
 if node:
     print(f"Node: {node['short_name']} - Battery: {node['battery_level']}%")
 ```
 
-#### `get_all_nodes_from_db()`
-Retrieve all nodes from the database, ordered by last heard (most recent first).
+#### `history.by_short_name(short_name)`
+Every remembered node with that short name (case-insensitive), most recently heard first.
+
+#### `history.all()`
+Every node, most recently heard first.
 
 ```python
-from db_operations import get_all_nodes_from_db
-
-nodes = get_all_nodes_from_db()
-for node in nodes:
+for node in history.all():
     print(f"{node['short_name']}: {node['battery_level']}%")
 ```
 
-#### `sync_all_nodes_to_db(interface)`
-Manually sync all nodes from the interface to the database.
+#### `history.record_all(roster)`
+Record every node in a roster. Returns how many were recorded; a bad entry is logged and skipped.
 
 ```python
-from db_operations import sync_all_nodes_to_db
-
-count = sync_all_nodes_to_db(interface)
-print(f"Synced {count} nodes to database")
+count = history.record_all(interface.nodes)
+print(f"Recorded {count} nodes")
 ```
 
 ## Use Cases
@@ -308,9 +296,9 @@ python node_stats.py stats
 Check for nodes with low battery:
 
 ```python
-from db_operations import get_all_nodes_from_db
+from node_history import NodeHistory
 
-nodes = get_all_nodes_from_db()
+nodes = NodeHistory().all()
 low_battery = [n for n in nodes if n['battery_level'] and n['battery_level'] < 20]
 
 for node in low_battery:
@@ -323,9 +311,9 @@ Identify active versus inactive nodes:
 
 ```python
 import time
-from db_operations import get_all_nodes_from_db
+from node_history import NodeHistory
 
-nodes = get_all_nodes_from_db()
+nodes = NodeHistory().all()
 current_time = int(time.time())
 one_hour_ago = current_time - 3600
 
@@ -349,10 +337,10 @@ python node_stats.py stats
 Export node locations for mapping:
 
 ```python
-from db_operations import get_all_nodes_from_db
+from node_history import NodeHistory
 import json
 
-nodes = get_all_nodes_from_db()
+nodes = NodeHistory().all()
 locations = []
 
 for node in nodes:

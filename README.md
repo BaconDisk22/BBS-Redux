@@ -285,7 +285,7 @@ python monitor_mqtt_topics.py --base-topic msh/US/CA --log-level DEBUG
 **Viewing Statistics**:
 - Send `TT` as a quick command, or
 - Access via Utilities menu → [T]op MQTT Topics
-- Shows the top 15 most active topics from the monitoring database
+- Shows the top 15 most active topics from the monitoring database, with the configured `base_topic` trimmed off each name
 
 **Running Monitor Automatically at Boot**:
 
@@ -325,13 +325,45 @@ To have the MQTT monitor script automatically start at boot:
 
 Broadcast messages to specific channels configured on your Meshtastic device.
 
+**Configuration** (`config.ini`):
+
+```ini
+[announcement]
+default_announcement_channel = 0
+default_message = Hello!  I am TC²-BBS.
+admin_nodes = !17d7e4b7,!18e9f5a3
+```
+
+- **admin_nodes**: the nodes allowed to announce. If it's empty, the `[allow_list]` Urgent board list is used instead. If both are empty, **any node** can broadcast to your channels.
+- **default_announcement_channel** / **default_message**: what the `QA` quick command sends.
+
 **Usage**:
 1. Access via Utilities menu → [A]nnouncement
 2. Select the channel number you want to broadcast to
-3. Type your message
-4. Message will be sent to all devices monitoring that channel
+3. Type your message, one line per message, then send `END`
+4. Check the preview and reply `Y` to send it to everyone on that channel
 
-This is useful for making network-wide announcements or alerting specific groups.
+Or send `QA` for the configured message, or `QA,,your text` to send your own text, to the configured channel.
+
+An announcement goes out as a single packet. Including the `📢 ANNOUNCEMENT 📢` prefix, it must fit in 200 bytes (an emoji counts as 4).
+
+### Node Info
+
+The BBS remembers every node it hears in `nodes.db` (see [NODE_TRACKING.md](NODE_TRACKING.md)), so you can look up a node even after it drops off the mesh.
+
+- Access via Utilities menu → [N]ode Info, then send a short name
+- Or send `N,,<short_name>`
+
+### Startup Announcement
+
+```ini
+[startup]
+enabled = True
+channel_index = 0
+message = TC²-BBS is online and ready!
+```
+
+When enabled, the BBS broadcasts this message on the channel 10 seconds after it starts.
 
 ### JS8Call Integration
 
@@ -376,12 +408,113 @@ For faster access, you can use these shortcut commands without navigating throug
 - **TT** - Show Top MQTT Topics
 - **WX** - Get weather for default location
 - **WX,**`<location>` - Get weather for specific location (e.g., `WX,90210` or `WX,Paris,FR`)
+- **N,,**`<short_name>` - Node Info
+- **QA** - Quick Announcement (admins only; `QA,,<text>` sends your own text)
 
 Send **Q** from the main menu to see the quick command reference on your device.
 
 A video of it in use is available on our YouTube channel:
 
 [![TC²-BBS-Mesh](https://img.youtube.com/vi/d6LhY4HoimU/0.jpg)](https://www.youtube.com/watch?v=d6LhY4HoimU)
+
+## Conversation map
+
+Every conversation starts at the main menu. Selecting a letter either **enters a
+flow** (a multi-step conversation like Mail or Bulletins) or triggers a **leaf**
+(a one-shot reply that leaves you where you are). Sending `X` from anywhere
+returns you to the main menu.
+
+```mermaid
+flowchart TD
+    MSG([Any direct message]) --> MAIN
+
+    MAIN["💾 TC² BBS<br/><sub>main menu</sub>"]
+    BBS["📰 BBS Menu"]
+    UTIL["🛠️ Utilities Menu"]
+
+    MAIN -->|B| BBS
+    MAIN -->|U| UTIL
+    MAIN -->|Q| QUICK["Quick Commands help"]
+
+    BBS -->|M| MAIL["✉️ Mail"]
+    BBS -->|B| BUL["📰 Bulletins"]
+    BBS -->|C| CHAN["📚 Channel Directory"]
+    BBS -->|J| JS8["📻 JS8Call"]
+
+    UTIL -->|S| STATS["📊 Stats"]
+    UTIL -->|F| FORT["🔮 Fortune"]
+    UTIL -->|W| WALL["🪫 Wall of Shame"]
+
+    QUICK -.-> MAIN
+    FORT -.-> UTIL
+    WALL -.-> UTIL
+
+    MAIL -.->|X| MAIN
+    BUL -.->|X| MAIN
+    CHAN -.->|X| MAIN
+    JS8 -.->|X| MAIN
+    STATS -.->|X| MAIN
+
+    classDef flow fill:#1e293b,color:#e0e7ff,stroke:#334155;
+    classDef leaf fill:#fef3c7,color:#78350f,stroke:#d97706;
+    classDef menu fill:#e0e7ff,color:#1e293b,stroke:#6366f1;
+    class MAIL,BUL,CHAN,STATS,JS8 flow
+    class QUICK,FORT,WALL leaf
+    class MAIN,BBS,UTIL menu
+```
+
+Solid arrows move you somewhere; dashed arrows return you. Dark boxes are flows,
+amber boxes are leaves, and light boxes are menus.
+
+Which letters each menu offers is configurable — see `[menu]` in `config.ini`.
+Removing a letter there removes it from the menu.
+
+### Quick commands
+
+Quick commands skip the menus entirely. They can be sent at any time, and they
+leave the conversation exactly where it was — sending `CM` halfway through
+composing a bulletin answers your mailbox and leaves you still composing.
+
+| Command | Does |
+| --- | --- |
+| `SM,,{short_name},,{subject},,{message}` | Send mail |
+| `CM` | Check mail |
+| `PB,,{board},,{subject},,{content}` | Post a bulletin |
+| `CB,,{board}` | Check bulletins on a board |
+| `CHP,,{name},,{url}` | Post a channel to the directory |
+| `CHL` | List channels |
+
+`{board}` must be one of General, Info, News, or Urgent. Posting to Urgent
+broadcasts a notice to the whole mesh, so it is restricted to the nodes listed
+under `[allow_list]` in `config.ini` — whether you post through the menu or
+through `PB,,`. If that section is absent, anyone may post there.
+
+The `,,` is a literal, required separator, not decoration — `SM,,bob,,Hi,,See
+you at 6` sends mail, but `SM` alone with no arguments (or `SM bob Hi ...`
+without commas) is not a valid command. `CM` and `CHL` take no arguments, so
+those two are sent bare. Send any quick command's letters alone with no `,,`
+(e.g. `PB`, `CB`, or `SM`) to get back its exact format as a reminder — a
+mistyped separator (e.g. a stray space, `PB, , General,,...`) gets the same
+reminder rather than being silently ignored.
+
+### For contributors
+
+Each conversation topic is a **Flow** — a pure module that, given a message and
+the current state, returns what to reply and where the conversation goes next.
+A **Session** dispatches to the flow that owns the current topic. The domain
+vocabulary lives in [CONTEXT.md](CONTEXT.md), and the reasoning behind this
+shape is recorded in [docs/adr/](docs/adr/).
+
+Run the tests with:
+
+```sh
+python run_tests.py            # everything
+python run_tests.py mail       # only files whose name contains "mail"
+```
+
+No test framework is required. A flow is tested through its interface with a
+fake store — no radio, no database. [docs/bugs-fixed.md](docs/bugs-fixed.md)
+records the bugs this refactor surfaced and which test guards each one.
 
 ## Thanks
 
